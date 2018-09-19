@@ -5,10 +5,10 @@
 namespace Settings
 {
 	template <class T>
-	constexpr T window_width = 1920;
+	constexpr T window_width = 640;
 
 	template <class T>
-	constexpr T window_height = 1200;
+	constexpr T window_height = 480;
 
 	template <class T>
 	constexpr T application_name = "Vulkan"; // caption

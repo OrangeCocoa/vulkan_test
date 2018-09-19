@@ -164,29 +164,7 @@ public:
 		return 0xffffffff;
 	}
 
-	bool check_layers(uint32_t check_count, char const *const *const check_names, uint32_t layer_count, vk::LayerProperties *layers)
-	{
-		for (uint32_t i = 0; i < check_count; ++i)
-		{
-			bool found = false;
-			for (uint32_t j = 0; j < layer_count; ++j)
-			{
-				if (!strcmp(check_names[i], layers[j].layerName))
-				{
-					found = true;
-					break;
-				}
-			}
-			if (!found)
-			{
-				Log::Error("Cannot find layer: %s", check_names[i]);
-				return 0;
-			}
-		}
-		return true;
-	}
-
-	bool memory_type_from_properties(uint32_t type_bits, vk::MemoryPropertyFlags requirements_mask, uint32_t *type_index)
+	uint32_t FindMemoryTypeIndex(uint32_t type_bits, vk::MemoryPropertyFlags requirements_mask)
 	{
 		// Search memtypes to find first index with those properties
 		for (uint32_t i = 0; i < VK_MAX_MEMORY_TYPES; ++i)
@@ -196,15 +174,14 @@ public:
 				// Type is available, does it match user properties?
 				if ((mem_props_.memoryTypes[i].propertyFlags & requirements_mask) == requirements_mask)
 				{
-					*type_index = i;
-					return true;
+					return i;
 				}
 			}
 			type_bits >>= 1;
 		}
 
 		// No memory types matched, return failure
-		return false;
+		return 0xffffffff;
 	}
 
 	uint32_t AcquireNextImage(vk::Semaphore present_completed)
@@ -398,8 +375,8 @@ bool Graphics::Run(void)
 		// submit at queue
 		vk::Fence fence = impl_->GetSubmitFence(true);
 		impl_->queue_.submit(submitInfo, fence);
-		vk::Result fence_res = impl_->device_.waitForFences(fence, VK_TRUE, 100000000000);
-		assert(fence_res == vk::Result::eSuccess);
+		auto result = impl_->device_.waitForFences(fence, VK_TRUE, 100000000000);
+		assert(result == vk::Result::eSuccess);
 		//impl_->queue_.waitIdle();
 	}
 
@@ -453,11 +430,11 @@ bool Graphics::Impl::CreateInstance(void)
 
 	if (!instance_)
 	{
-		Log::Info("Cannot create instance.");
+		Log::Info("Instance cannot create.");
 		return false;
 	}
 
-	Log::Info("Instance created.");
+	Log::Info("Instance create done.");
 
 	return true;
 }
@@ -465,7 +442,6 @@ bool Graphics::Impl::CreateInstance(void)
 bool Graphics::Impl::CreateDebugLayer(void)
 {
 #if defined(_DEBUG)
-	// デバッグ用コールバック設定
 	{
 		/*create_debug_report_callback = (PFN_vkCreateDebugReportCallbackEXT)instance_.getProcAddr("vkCreateDebugReportCallbackEXT");
 		destroy_debug_report_callback = (PFN_vkDestroyDebugReportCallbackEXT)instance_.getProcAddr("vkDestroyDebugReportCallbackEXT");
@@ -539,7 +515,7 @@ bool Graphics::Impl::EnumeratePhysicalDevice(void)
 
 			auto result = gpu_.enumerateDeviceExtensionProperties(nullptr, &device_extension_count, nullptr);
 			assert(result == vk::Result::eSuccess);
-			Log::Info("\nExtension Count = %d", device_extension_count);
+			Log::Info("Extension Count = %d", device_extension_count);
 			
 			/*device features*/{
 				vk::PhysicalDeviceFeatures dev_features;
@@ -669,9 +645,13 @@ bool Graphics::Impl::CreateSurface(void)
 		.setHwnd(window_->GetWindowHandle());
 
 	auto result = instance_.createWin32SurfaceKHR(&create_info, nullptr, &surface_);
-	assert(result == vk::Result::eSuccess);
+	if (result != vk::Result::eSuccess)
+	{
+		Log::Error("Surface cannot created.");
+		return false;
+	}
 
-	Log::Info("Surface created.");
+	Log::Info("Surface create done.");
 
 	return true;
 }
@@ -702,11 +682,11 @@ bool Graphics::Impl::CreateDevice(void)
 
 	if (!device_)
 	{
-		Log::Info("Cannot create device.");
+		Log::Info("Device cannot created.");
 		return false;
 	}
 
-	Log::Info("Device created.");
+	Log::Info("Device create done.");
 
 	return true;
 }
@@ -721,11 +701,11 @@ bool Graphics::Impl::CreateCommandPool(void)
 	
 	if (!command_pool_)
 	{
-		Log::Info("Cannot create commandpool.");
+		Log::Info("Commandpool cannot created.");
 		return false;
 	}
 
-	Log::Info("Commandpool created.");
+	Log::Info("Commandpool create done.");
 
 	return true;
 }
@@ -831,14 +811,18 @@ bool Graphics::Impl::CreateSwapChain(void)
 		.setOldSwapchain(old_sc);
 
 	result = device_.createSwapchainKHR(&swap_chain_info, nullptr, &swap_chain_);
-	assert(result == vk::Result::eSuccess);
+	if (result != vk::Result::eSuccess)
+	{
+		Log::Error("Swapchain cannot created.");
+		return false;
+	}
 
 	if (old_sc)
 	{
 		device_.destroySwapchainKHR(old_sc, nullptr);
 	}
 
-	Log::Info("Swapchain created.");
+	Log::Info("Swapchain create done.");
 
 	return true;
 }
@@ -855,8 +839,11 @@ bool Graphics::Impl::InitSemaphoreSettings(void)
 
 	if (!present_complete_semaphore_ || !draw_complete_semaphore_)
 	{
+		Log::Error("Semaphores cannot setting.");
 		return false;
 	}
+
+	Log::Info("Semaphores setting done.");
 
 	return true;
 }
@@ -866,14 +853,17 @@ bool Graphics::Impl::CreateCommandBufffer(void)
 	vk::CommandBufferAllocateInfo alloc_info;
 	alloc_info.commandPool = command_pool_;
 	alloc_info.commandBufferCount = sc_image_count_;
-	auto result = device_.allocateCommandBuffers(alloc_info);
 
+	auto result = device_.allocateCommandBuffers(alloc_info);
 	if (result.result != vk::Result::eSuccess)
 	{
+		Log::Error("Command buffers cannot created.");
 		return false;
 	}
 
 	command_buffers_ = result.value;
+
+	Log::Info("Command buffers create done.");
 
 	return true;
 }
@@ -881,11 +871,19 @@ bool Graphics::Impl::CreateCommandBufffer(void)
 bool Graphics::Impl::CreateRenderImage(void)
 {
 	auto result = device_.getSwapchainImagesKHR(swap_chain_, &sc_image_count_, nullptr);
-	assert(result == vk::Result::eSuccess);
+	if (result != vk::Result::eSuccess)
+	{
+		Log::Error("Swap chain image count cannot get.");
+		return false;
+	}
 
 	std::unique_ptr<vk::Image[]> images(new vk::Image[sc_image_count_]);
 	result = device_.getSwapchainImagesKHR(swap_chain_, &sc_image_count_, images.get());
-	assert(result == vk::Result::eSuccess);
+	if (result != vk::Result::eSuccess)
+	{
+		Log::Error("Swap chain image cannot get.");
+		return false;
+	}
 
 	sc_resources_.reset(new SwapchainImageResources[sc_image_count_]);
 	
@@ -900,23 +898,33 @@ bool Graphics::Impl::CreateRenderImage(void)
 		image_view_info.image = sc_resources_[i].image;
 
 		result = device_.createImageView(&image_view_info, nullptr, &sc_resources_[i].view);
-		assert(result == vk::Result::eSuccess);
+		if (result != vk::Result::eSuccess)
+		{
+			Log::Error("Render image cannot created.");
+			return false;
+		}
 	}
 
-	Log::Info("Render image created.");
+	Log::Info("Render image create done.");
 
 	return true;
 }
 
 bool Graphics::Impl::CreateDepthImage(void)
 {
-	depth_target_.format = vk::Format::eD16Unorm;
+	// supported check
+	depth_target_.format = vk::Format::eD32SfloatS8Uint;
+	vk::FormatProperties format_props = gpu_.getFormatProperties(depth_target_.format);
+	if (!(format_props.optimalTilingFeatures & vk::FormatFeatureFlagBits::eDepthStencilAttachment))
+	{
+		Log::Error("Depth buffer format do not supported ""eD32SfloatS8Uint"".");
+		return false;
+	}
 
 	vk::Extent3D extent = vk::Extent3D()
 		.setWidth(Settings::window_width<uint32_t>)
 		.setHeight(Settings::window_height<uint32_t>)
 		.setDepth(1);
-
 
 	auto const image = vk::ImageCreateInfo()
 		.setImageType(vk::ImageType::e2D)
@@ -933,34 +941,47 @@ bool Graphics::Impl::CreateDepthImage(void)
 		.setInitialLayout(vk::ImageLayout::eUndefined);
 
 	auto result = device_.createImage(&image, nullptr, &depth_target_.image);
-	assert(result == vk::Result::eSuccess);
+	if (result != vk::Result::eSuccess)
+	{
+		Log::Error("Depth buffer image cannot created.");
+		return false;
+	}
 
 	vk::MemoryRequirements mem_reqs;
 	device_.getImageMemoryRequirements(depth_target_.image, &mem_reqs);
 
 	depth_target_.mem_alloc.setAllocationSize(mem_reqs.size)
-		.setMemoryTypeIndex(0);
-
-	auto const pass = memory_type_from_properties(mem_reqs.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal,
-		&depth_target_.mem_alloc.memoryTypeIndex);
-	assert(pass);
+		.setMemoryTypeIndex(FindMemoryTypeIndex(mem_reqs.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal));
 
 	result = device_.allocateMemory(&depth_target_.mem_alloc, nullptr, &depth_target_.mem);
-	assert(result == vk::Result::eSuccess);
+	if (result != vk::Result::eSuccess)
+	{
+		Log::Error("Depth buffer memory cannot allocated.");
+		return false;
+	}
 
 	result = device_.bindImageMemory(depth_target_.image, depth_target_.mem, 0);
-	assert(result == vk::Result::eSuccess);
+	if (result != vk::Result::eSuccess)
+	{
+		Log::Error("Depth buffer memory cannot binded.");
+		return false;
+	}
 
-	auto const view = vk::ImageViewCreateInfo()
+	vk::ImageViewCreateInfo view = vk::ImageViewCreateInfo()
 		.setImage(depth_target_.image)
 		.setViewType(vk::ImageViewType::e2D)
 		.setFormat(depth_target_.format)
+		//.setComponents({ vk::ComponentSwizzle::eR, vk::ComponentSwizzle::eG, vk::ComponentSwizzle::eB, vk::ComponentSwizzle::eA })
 		.setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eDepth, 0, 1, 0, 1));
 
 	result = device_.createImageView(&view, nullptr, &depth_target_.view);
-	assert(result == vk::Result::eSuccess);
+	if (result != vk::Result::eSuccess)
+	{
+		Log::Error("Depth buffer image cannot created.");
+		return false;
+	}
 
-	Log::Info("Depth image created.");
+	Log::Info("Depth image create done.");
 
 	return true;
 }
@@ -1013,9 +1034,13 @@ bool Graphics::Impl::CreateRenderPass(void)
 		.setPDependencies(nullptr);
 
 	auto result = device_.createRenderPass(&rp_info, nullptr, &render_pass_);
-	assert(result == vk::Result::eSuccess);
+	if (result != vk::Result::eSuccess)
+	{
+		Log::Error("Render pass cannot created.");
+		return false;
+	}
 
-	Log::Info("Render pass created.");
+	Log::Info("Render pass create done.");
 
 	return true;
 }
@@ -1041,7 +1066,7 @@ bool Graphics::Impl::CreateFrameBuffer(void)
 		assert(result == vk::Result::eSuccess);
 	}
 
-	Log::Info("Frame buffer created.");
+	Log::Info("Frame buffer create done.");
 
 	return true;
 }
@@ -1049,15 +1074,15 @@ bool Graphics::Impl::CreateFrameBuffer(void)
 bool Graphics::Impl::CreatePipelineCache(void)
 {
 	auto result = device_.createPipelineCache(vk::PipelineCacheCreateInfo());
-
 	if (result.result != vk::Result::eSuccess)
 	{
+		Log::Error("Pipeline cache cannot created.");
 		return false;
 	}
 
 	pipeline_cache_ = result.value;
 
-	Log::Info("Pipeline created.");
+	Log::Info("Pipeline cache create done.");
 
 	return true;
 }
@@ -1066,7 +1091,7 @@ bool Graphics::Impl::CreateQueue(void)
 {
 	device_.getQueue(graphics_queue_family_index_, 0, &queue_);
 
-	Log::Info("Queue created.");
+	Log::Info("Graphics queue create done.");
 
 	return true;
 }
