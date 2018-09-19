@@ -24,8 +24,12 @@ bool CoreManager::Initialize(void)
 
 bool CoreManager::Run(void)
 {
+	impl_->graphics_->BeginFrame();
+
 	// application run anything
 	impl_->graphics_->Run();
+
+	impl_->graphics_->EndFrame();
 
 	return impl_->wait_exit; // default -> false
 }

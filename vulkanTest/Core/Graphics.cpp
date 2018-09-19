@@ -1,7 +1,12 @@
 
+#include<vector>
+#include<sstream>
+#include<iostream>
 #include<iterator>
 #include"Graphics.h"
 #define VK_USE_PLATFORM_WIN32_KHR
+#define VULKAN_HPP_NO_SMART_HANDLE
+#define VULKAN_HPP_NO_EXCEPTIONS
 #include<vulkan/vulkan.hpp>
 #include<vulkan/vk_sdk_platform.h>
 #include<vulkan/vulkan_win32.h>
@@ -14,58 +19,295 @@
 class Graphics::Impl
 {
 public:
-	const std::unique_ptr<Window>& window_;
+	struct Depth
+	{
+		vk::Format				format;
+		vk::Image				image;
+		vk::MemoryAllocateInfo	mem_alloc;
+		vk::DeviceMemory		mem;
+		vk::ImageView			view;
+	} depth_target_;
 
-	vk::Instance instance_;
-	vk::PhysicalDevice gpu_;
-	vk::PhysicalDeviceProperties gpu_props_;
-	std::unique_ptr<vk::QueueFamilyProperties[]> queue_props_;
-	uint32_t queue_family_count_;
-	uint32_t graphics_queue_family_index_;
-	vk::Device device_;
-	vk::CommandPool command_pool_;
-	vk::Fence fence_;
+	const std::unique_ptr<Window>&					window_;
+
+	vk::Instance									instance_;
+	vk::PhysicalDevice								gpu_;
+	vk::PhysicalDeviceProperties					gpu_props_;
+	vk::Device										device_;
+	vk::PipelineCache								pipeline_cache_;
+	vk::Queue										queue_;
+	vk::CommandPool									command_pool_;
+	std::vector<vk::CommandBuffer>					command_buffers_;
+	vk::Semaphore									present_complete_semaphore_;
+	vk::Semaphore									draw_complete_semaphore_;
+
+	std::unique_ptr<vk::QueueFamilyProperties[]>	queue_props_;
+	uint32_t										queue_family_count_;
+
+#if defined(_DEBUG)
+	PFN_vkCreateDebugReportCallbackEXT				create_debug_report_callback;
+	PFN_vkDestroyDebugReportCallbackEXT				destroy_debug_report_callback;
+	PFN_vkDebugReportMessageEXT						debug_break_callback;
+	VkDebugReportCallbackEXT						msg_callback;
+#endif
+	
 	// swap chain
-	vk::SurfaceKHR surface_;
-	vk::PresentInfoKHR present_info_;
-	vk::SwapchainKHR swap_chain_;
-	vk::ImageView image_view_;
-	vk::RenderPass render_pass_;
-	vk::Framebuffer frame_buffer_;
+	struct SwapchainImageResources
+	{
+		vk::Image		image;
+		vk::ImageView	view;
+		vk::Fence		fence;
+		vk::Framebuffer	frame_buffer;
+	};
 
-	Impl(std::unique_ptr<Window>& window) : window_(window){}
+	vk::Format										swap_target_format_;
+	uint32_t										sc_image_count_;
+	uint32_t										graphics_queue_family_index_;
+	uint32_t										sc_current_image_;
+	std::unique_ptr<SwapchainImageResources[]>		sc_resources_;
+	vk::SurfaceKHR									surface_;
+	vk::SwapchainKHR								swap_chain_;
+	vk::PresentInfoKHR								present_info_;
+
+	vk::PhysicalDeviceMemoryProperties mem_props_;
+	vk::RenderPass render_pass_;
+
+	static const char* debug_layers_[];
+
+	Impl(std::unique_ptr<Window>& window)
+		: window_(window)
+		, sc_image_count_(0)
+		, sc_current_image_(0)
+#if defined(_DEBUG)
+		, create_debug_report_callback(VK_NULL_HANDLE)
+		, destroy_debug_report_callback(VK_NULL_HANDLE)
+		, debug_break_callback(VK_NULL_HANDLE)
+#endif
+	{
+		present_info_.setSwapchainCount(1)
+			.setPSwapchains(&swap_chain_)
+			.setPImageIndices(&sc_current_image_);
+
+	}
 
 	bool CreateInstance(void);
 	bool CreateDebugLayer(void);
 	bool EnumeratePhysicalDevice(void);
 	bool CreateSurface(void);
 	bool CreateDevice(void);
+	bool CreateQueue(void);
+	bool CreatePipelineCache(void);
 	bool CreateCommandPool(void);		// similar command allocater
-	bool CreateFence(void);				// sync mechanism
 	bool CreateSwapChain(void);
-	bool CreateImageView(void);
+	bool InitSemaphoreSettings(void);
+	bool CreateCommandBufffer(void);
+
+	bool CreateRenderImage(void);
+	bool CreateDepthImage(void);
 	bool CreateRenderPass(void);
 	bool CreateFrameBuffer(void);
-	bool CreatePipeline(void);
+
+	vk::Bool32 DebugMessageCallback(
+		VkDebugReportFlagsEXT flags,
+		VkDebugReportObjectTypeEXT objType,
+		uint64_t srcObject,
+		size_t location,
+		int32_t msgCode,
+		const char* pLayerPrefix,
+		const char* pMsg,
+		void* pUserData)
+	{
+		std::string message;
+		{
+			std::stringstream buf;
+			if (flags & VK_DEBUG_REPORT_ERROR_BIT_EXT) {
+				buf << "ERROR: ";
+			}
+			else if (flags & VK_DEBUG_REPORT_WARNING_BIT_EXT) {
+				buf << "WARNING: ";
+			}
+			else if (flags & VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT) {
+				buf << "PERF: ";
+			}
+			else {
+				return false;
+			}
+			buf << "[" << pLayerPrefix << "] Code " << msgCode << " : " << pMsg;
+			message = buf.str();
+		}
+
+		std::cout << message << std::endl;
+
+		// デバッグウィンドウにも出力
+		OutputDebugStringA(message.c_str());
+		OutputDebugStringA("\n");
+
+		return false;
+	}
+
+	uint32_t FindQueue(vk::QueueFlags flag)
+	{
+		for (uint32_t i = 0; i < queue_family_count_; ++i)
+		{
+			if (queue_props_[i].queueFlags & flag)
+			{
+				uint32_t supported;
+				if (gpu_.getSurfaceSupportKHR(i, surface_, &supported) != vk::Result::eSuccess)
+				{
+					continue;
+				}
+
+				return i;
+			}
+		}
+
+		return 0xffffffff;
+	}
 
 	bool check_layers(uint32_t check_count, char const *const *const check_names, uint32_t layer_count, vk::LayerProperties *layers)
 	{
-		for (uint32_t i = 0; i < check_count; ++i) {
+		for (uint32_t i = 0; i < check_count; ++i)
+		{
 			bool found = false;
-			for (uint32_t j = 0; j < layer_count; ++j) {
-				if (!strcmp(check_names[i], layers[j].layerName)) {
+			for (uint32_t j = 0; j < layer_count; ++j)
+			{
+				if (!strcmp(check_names[i], layers[j].layerName))
+				{
 					found = true;
 					break;
 				}
 			}
-			if (!found) {
+			if (!found)
+			{
 				Log::Error("Cannot find layer: %s", check_names[i]);
 				return 0;
 			}
 		}
 		return true;
 	}
+
+	bool memory_type_from_properties(uint32_t type_bits, vk::MemoryPropertyFlags requirements_mask, uint32_t *type_index)
+	{
+		// Search memtypes to find first index with those properties
+		for (uint32_t i = 0; i < VK_MAX_MEMORY_TYPES; ++i)
+		{
+			if ((type_bits & 1) == 1)
+			{
+				// Type is available, does it match user properties?
+				if ((mem_props_.memoryTypes[i].propertyFlags & requirements_mask) == requirements_mask)
+				{
+					*type_index = i;
+					return true;
+				}
+			}
+			type_bits >>= 1;
+		}
+
+		// No memory types matched, return failure
+		return false;
+	}
+
+	uint32_t AcquireNextImage(vk::Semaphore present_completed)
+	{
+		auto result = device_.acquireNextImageKHR(swap_chain_, UINT64_MAX, present_completed, vk::Fence());
+
+		if (result.result != vk::Result::eSuccess)
+		{
+			return sc_current_image_;
+		}
+
+		sc_current_image_ = result.value;
+		return sc_current_image_;
+	}
+
+	void SetPipelineBarrier(
+		vk::CommandBuffer cmd_buffer,
+		vk::Image image,
+		vk::ImageLayout old_layout,
+		vk::ImageLayout new_layout,
+		vk::ImageSubresourceRange sub_range)
+	{
+		vk::ImageMemoryBarrier image_memory_barrier = vk::ImageMemoryBarrier()
+			.setImage(image)
+			.setOldLayout(old_layout)
+			.setNewLayout(new_layout)
+			.setSubresourceRange(sub_range);
+
+		/*old layout*/{
+			if (old_layout == vk::ImageLayout::ePreinitialized)
+				image_memory_barrier.srcAccessMask = vk::AccessFlagBits::eHostWrite;
+			// transfer destination
+			else if (old_layout == vk::ImageLayout::eTransferDstOptimal)
+				image_memory_barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+			// transfer source
+			else if (old_layout == vk::ImageLayout::eTransferSrcOptimal)
+				image_memory_barrier.srcAccessMask = vk::AccessFlagBits::eTransferRead;
+			// color
+			else if (old_layout == vk::ImageLayout::eColorAttachmentOptimal)
+				image_memory_barrier.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
+			// depth stencil
+			else if (old_layout == vk::ImageLayout::eDepthStencilAttachmentOptimal)
+				image_memory_barrier.srcAccessMask = vk::AccessFlagBits::eDepthStencilAttachmentWrite;
+			// shader resource
+			else if (old_layout == vk::ImageLayout::eShaderReadOnlyOptimal)
+				image_memory_barrier.srcAccessMask = vk::AccessFlagBits::eShaderRead;
+		}
+
+		/*next layout*/{
+			// transfer destination
+			if (new_layout == vk::ImageLayout::eTransferDstOptimal)
+				image_memory_barrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+			// transfer source
+			else if (new_layout == vk::ImageLayout::eTransferSrcOptimal)
+				image_memory_barrier.dstAccessMask = vk::AccessFlagBits::eTransferRead;// | image_memory_barrier.srcAccessMask;
+			// color																																	 // カラー
+			else if (new_layout == vk::ImageLayout::eColorAttachmentOptimal)
+				image_memory_barrier.dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
+			// depth stencil
+			else if (new_layout == vk::ImageLayout::eDepthStencilAttachmentOptimal)
+				image_memory_barrier.dstAccessMask = vk::AccessFlagBits::eDepthStencilAttachmentWrite;
+			// shader resource
+			else if (new_layout == vk::ImageLayout::eShaderReadOnlyOptimal)
+				image_memory_barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
+		}
+
+		cmd_buffer.pipelineBarrier(
+			vk::PipelineStageFlagBits::eTopOfPipe,
+			vk::PipelineStageFlagBits::eTopOfPipe,
+			vk::DependencyFlags(),
+			nullptr, nullptr, image_memory_barrier);
+	}
+
+	void Present(vk::Semaphore wait_semaphore)
+	{
+		present_info_.waitSemaphoreCount = wait_semaphore ? 1 : 0;
+		present_info_.pWaitSemaphores = &wait_semaphore;
+		queue_.presentKHR(present_info_);
+	}
+
+	vk::Fence GetSubmitFence(bool destroy = false)
+	{
+		auto& sc_resouce = sc_resources_[sc_current_image_];
+
+		while (sc_resouce.fence)
+		{
+			auto fence_res = device_.waitForFences(sc_resouce.fence, VK_TRUE, 100000000000);
+			if (fence_res == vk::Result::eSuccess)
+			{
+				if (destroy)
+				{
+					device_.destroyFence(sc_resouce.fence);
+				}
+				sc_resouce.fence = vk::Fence();
+			}
+		}
+
+		device_.createFence(&vk::FenceCreateInfo(), nullptr, &sc_resouce.fence);
+		return sc_resouce.fence;
+	}
 };
+
+const char* Graphics::Impl::debug_layers_[] = { "VK_LAYER_LUNARG_standard_validation" };
 
 Graphics::Graphics(std::unique_ptr<Window>& window) : impl_(std::make_unique<Impl>(window)) {}
 
@@ -81,15 +323,88 @@ bool Graphics::Initialize(void)
 	
 	if (!impl_->CreateDevice()) return false;
 
+	if (!impl_->CreateDebugLayer()) return false;
+
+	if (!impl_->CreatePipelineCache()) return false;
+
+	if (!impl_->CreateQueue()) return false;
+
 	if (!impl_->CreateCommandPool()) return false;
 
-	if (!impl_->CreateFence()) return false;
+	if (!impl_->CreateSwapChain()) return false;
+
+	if (!impl_->CreateRenderImage()) return false;
+	
+	if (!impl_->CreateDepthImage()) return false;
+
+	if (!impl_->InitSemaphoreSettings()) return false;
+	
+	if (!impl_->CreateCommandBufffer()) return false;
+
+	//if (!impl_->CreateRenderPass()) return false;
+
+	//if (!impl_->CreateFrameBuffer()) return false;
 
 	return true;
 }
 
 bool Graphics::Run(void)
 {
+	// get next buffer
+	uint32_t current_buffer = impl_->AcquireNextImage(impl_->present_complete_semaphore_);
+
+	auto& cmd_buffer = impl_->command_buffers_[current_buffer];
+
+	/*command buffer stack*/ {
+		cmd_buffer.reset(vk::CommandBufferResetFlagBits::eReleaseResources);
+		vk::CommandBufferBeginInfo cmd_buf_info;
+		cmd_buffer.begin(cmd_buf_info);
+
+		vk::ClearColorValue clear_color(std::array<float, 4>{ 0.0f, 0.5f, 0.5f, 1.0f });
+
+		vk::ImageSubresourceRange image_sub_range = vk::ImageSubresourceRange()
+			.setAspectMask(vk::ImageAspectFlagBits::eColor)
+			.setLevelCount(1)
+			.setLayerCount(1);
+
+		auto& color_image = impl_->sc_resources_[impl_->sc_current_image_].image;
+
+		cmd_buffer.clearColorImage(color_image, vk::ImageLayout::eTransferDstOptimal, clear_color, image_sub_range);
+
+		impl_->SetPipelineBarrier(
+			cmd_buffer,
+			color_image,
+			vk::ImageLayout::eTransferDstOptimal,
+			vk::ImageLayout::ePresentSrcKHR,
+			image_sub_range);
+
+		cmd_buffer.end();
+	}
+
+	/*command buffer submit*/{
+		vk::PipelineStageFlags pipeline_stages = vk::PipelineStageFlagBits::eBottomOfPipe;
+		vk::SubmitInfo submitInfo;
+		submitInfo.pWaitDstStageMask = &pipeline_stages;
+		// wait semaphore
+		submitInfo.waitSemaphoreCount = 1;
+		submitInfo.pWaitSemaphores = &impl_->present_complete_semaphore_;
+		// pass command buffer
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &impl_->command_buffers_[current_buffer];
+		// render semaphore registering
+		submitInfo.signalSemaphoreCount = 1;
+		submitInfo.pSignalSemaphores = &impl_->draw_complete_semaphore_;
+
+		// submit at queue
+		vk::Fence fence = impl_->GetSubmitFence(true);
+		impl_->queue_.submit(submitInfo, fence);
+		vk::Result fence_res = impl_->device_.waitForFences(fence, VK_TRUE, 100000000000);
+		assert(fence_res == vk::Result::eSuccess);
+		//impl_->queue_.waitIdle();
+	}
+
+	impl_->Present(impl_->draw_complete_semaphore_);
+
 	return true;
 }
 
@@ -112,36 +427,66 @@ bool Graphics::Impl::CreateInstance(void)
 {
 	auto const app_info = vk::ApplicationInfo()
 		.setPApplicationName(Settings::application_name<char[]>)
-		.setApplicationVersion(0)
 		.setPEngineName(Settings::application_name<char[]>)
-		.setEngineVersion(0)
 		.setApiVersion(VK_API_VERSION_1_0);
 
-	unsigned int layer_count = 1;
-	const char* validation_layers[] = { "VK_LAYER_LUNARG_standard_validation" };
-	unsigned int extension_count = 3;
-	const char* validation_extention[] =
+	const char* extention[] =
 	{
 		VK_KHR_SURFACE_EXTENSION_NAME,			// necessary
-		VK_KHR_WIN32_SURFACE_EXTENSION_NAME,	// necessary
+		VK_KHR_WIN32_SURFACE_EXTENSION_NAME,	// necessary win32
+#if defined(_DEBUG)
 		VK_EXT_DEBUG_REPORT_EXTENSION_NAME
+#endif
 	};
+	unsigned int extension_count = std::size(extention);
 
 	auto const instance_info = vk::InstanceCreateInfo()
 		.setPApplicationInfo(&app_info)
-		.setEnabledLayerCount(layer_count)
-		.setPpEnabledLayerNames(validation_layers)
+#if defined(_DEBUG)
+		.setEnabledLayerCount(std::size(debug_layers_))
+		.setPpEnabledLayerNames(debug_layers_)
+#endif
 		.setEnabledExtensionCount(extension_count)
-		.setPpEnabledExtensionNames(validation_extention);
+		.setPpEnabledExtensionNames(extention);
 
-	auto result = vk::createInstance(&instance_info, nullptr, &instance_);
-	assert(result == vk::Result::eSuccess);
+	vk::createInstance(&instance_info, nullptr, &instance_);
+
+	if (!instance_)
+	{
+		Log::Info("Cannot create instance.");
+		return false;
+	}
+
+	Log::Info("Instance created.");
 
 	return true;
 }
 
 bool Graphics::Impl::CreateDebugLayer(void)
 {
+#if defined(_DEBUG)
+	// デバッグ用コールバック設定
+	{
+		/*create_debug_report_callback = (PFN_vkCreateDebugReportCallbackEXT)instance_.getProcAddr("vkCreateDebugReportCallbackEXT");
+		destroy_debug_report_callback = (PFN_vkDestroyDebugReportCallbackEXT)instance_.getProcAddr("vkDestroyDebugReportCallbackEXT");
+		debug_break_callback = (PFN_vkDebugReportMessageEXT)instance_.getProcAddr("vkDebugReportMessageEXT");
+
+		VkDebugReportCallbackCreateInfoEXT dbgCreateInfo = {};
+		vk::DebugReportFlagsEXT flags = vk::DebugReportFlagBitsEXT::eError | vk::DebugReportFlagBitsEXT::eWarning;
+		dbgCreateInfo.sType = VK_STRUCTURE_TYPE_DEBUG_REPORT_CREATE_INFO_EXT;
+		dbgCreateInfo.pfnCallback = (PFN_vkDebugReportCallbackEXT)DebugMessageCallback;
+		dbgCreateInfo.flags = flags.operator VkSubpassDescriptionFlags();
+
+		create_debug_report_callback(static_cast<VkInstance>(instance_), &dbgCreateInfo, nullptr, &msg_callback);
+		
+		if (!msg_callback)
+		{
+			Log::Error("Cannot create debug layer.");
+			return false;
+		}*/
+	}
+#endif
+
 	return true;
 }
 
@@ -162,7 +507,7 @@ bool Graphics::Impl::EnumeratePhysicalDevice(void)
 
 			gpu_.getProperties(&gpu_props_);
 
-			Log::Info("================ VulkanPhysicalDevice[%d/%d] ================", i + 1, gpu_count);
+			Log::Info("\n================ VulkanPhysicalDevice[%d/%d] ================", i + 1, gpu_count);
 			Log::Info("%s", gpu_props_.deviceName);
 			Log::Info("apiVersion = %d.%d.%d\n",
 				VK_VERSION_MAJOR(gpu_props_.apiVersion),
@@ -194,7 +539,7 @@ bool Graphics::Impl::EnumeratePhysicalDevice(void)
 
 			auto result = gpu_.enumerateDeviceExtensionProperties(nullptr, &device_extension_count, nullptr);
 			assert(result == vk::Result::eSuccess);
-			Log::Info("Extension Count = %d", device_extension_count);
+			Log::Info("\nExtension Count = %d", device_extension_count);
 			
 			/*device features*/{
 				vk::PhysicalDeviceFeatures dev_features;
@@ -255,7 +600,7 @@ bool Graphics::Impl::EnumeratePhysicalDevice(void)
 				Log::Info("sparseResidency16Samples = %d", dev_features.sparseResidency16Samples);
 				Log::Info("sparseResidencyAliased = %d", dev_features.sparseResidencyAliased);
 				Log::Info("variableMultisampleRate = %d", dev_features.variableMultisampleRate);
-				Log::Info("inheritedQueries = %d", dev_features.inheritedQueries);
+				Log::Info("inheritedQueries = %d\n", dev_features.inheritedQueries);
 			}
 
 			/*memory propaties*/{
@@ -297,12 +642,13 @@ bool Graphics::Impl::EnumeratePhysicalDevice(void)
 				" extension.\n\n"
 				"Do you have a compatible Vulkan installable client driver (ICD) installed?\n"
 				"Please look at the Getting Started guide for additional information.\n",
-				"vkCreateInstance Failure");
+				"vkCreateInstance Failure\n");
 		}
 
 		gpu_.getQueueFamilyProperties(&queue_family_count_, nullptr);
 		queue_props_.reset(new vk::QueueFamilyProperties[queue_family_count_]);
 		gpu_.getQueueFamilyProperties(&queue_family_count_, queue_props_.get());
+		gpu_.getMemoryProperties(&mem_props_);
 	}
 	else
 	{
@@ -310,6 +656,8 @@ bool Graphics::Impl::EnumeratePhysicalDevice(void)
 
 		return false;
 	}
+
+	Log::Info("Physical device captured.");
 
 	return true;
 }
@@ -323,41 +671,42 @@ bool Graphics::Impl::CreateSurface(void)
 	auto result = instance_.createWin32SurfaceKHR(&create_info, nullptr, &surface_);
 	assert(result == vk::Result::eSuccess);
 
+	Log::Info("Surface created.");
+
 	return true;
 }
 
 bool Graphics::Impl::CreateDevice(void)
 {
-	graphics_queue_family_index_ = UINT32_MAX;
-	uint32_t present_queue_family_index = UINT32_MAX;
-	for (uint32_t i = 0; i < queue_family_count_; ++i)
-	{
-		if (queue_props_[i].queueFlags & vk::QueueFlagBits::eGraphics)
-		{
-			graphics_queue_family_index_ = i;
-		}
-	}
+	graphics_queue_family_index_ = FindQueue(vk::QueueFlagBits::eGraphics);
 
 	float const priorities[] = { 0.0 };
 
-	vk::DeviceQueueCreateInfo queue;
-	queue.setQueueFamilyIndex(graphics_queue_family_index_);
-	queue.setQueueCount(1);
-	queue.setPQueuePriorities(priorities);
+	vk::DeviceQueueCreateInfo queue_info;
+	queue_info.setQueueFamilyIndex(graphics_queue_family_index_)
+		.setQueueCount(1)
+		.setPQueuePriorities(priorities);
 
-	const char *extention_name[] = { "VK_KHR_swapchain" };
+	const char *extention_name[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 
 	auto device_info = vk::DeviceCreateInfo()
 		.setQueueCreateInfoCount(1)
-		.setPQueueCreateInfos(&queue)
-		.setEnabledLayerCount(0)
-		.setPpEnabledLayerNames(nullptr)
-		.setEnabledExtensionCount(1)
+		.setPQueueCreateInfos(&queue_info)
+		.setEnabledLayerCount(std::size(debug_layers_))
+		.setPpEnabledLayerNames(debug_layers_)
+		.setEnabledExtensionCount(std::size(extention_name))
 		.setPpEnabledExtensionNames(reinterpret_cast<const char* const*>(extention_name))
-		.setPEnabledFeatures(nullptr);
+		.setPEnabledFeatures(&gpu_.getFeatures());
 
-	auto result = gpu_.createDevice(&device_info, nullptr, &device_);
-	assert(result == vk::Result::eSuccess);
+	gpu_.createDevice(&device_info, nullptr, &device_);
+
+	if (!device_)
+	{
+		Log::Info("Cannot create device.");
+		return false;
+	}
+
+	Log::Info("Device created.");
 
 	return true;
 }
@@ -368,43 +717,356 @@ bool Graphics::Impl::CreateCommandPool(void)
 		.setQueueFamilyIndex(graphics_queue_family_index_)
 		.setFlags(vk::CommandPoolCreateFlagBits::eResetCommandBuffer);
 
-	auto result = device_.createCommandPool(&command_info, nullptr, &command_pool_);
-	assert(result == vk::Result::eSuccess);
+	device_.createCommandPool(&command_info, nullptr, &command_pool_);
+	
+	if (!command_pool_)
+	{
+		Log::Info("Cannot create commandpool.");
+		return false;
+	}
 
-	return true;
-}
-
-bool Graphics::Impl::CreateFence(void)
-{
-	auto fence_info = vk::FenceCreateInfo();
-
-	auto result = device_.createFence(&fence_info, nullptr, &fence_);
-	assert(result == vk::Result::eSuccess);
+	Log::Info("Commandpool created.");
 
 	return true;
 }
 
 bool Graphics::Impl::CreateSwapChain(void)
 {
+	vk::SwapchainKHR old_sc = swap_chain_;
+
+	swap_target_format_ = vk::Format::eR8G8B8A8Unorm;
+
+	uint32_t supported;
+	auto result = gpu_.getSurfaceSupportKHR(graphics_queue_family_index_, surface_, &supported);
+	assert(result == vk::Result::eSuccess);
+
+	vk::SurfaceCapabilitiesKHR caps;
+	result = gpu_.getSurfaceCapabilitiesKHR(surface_, &caps);
+	assert(result == vk::Result::eSuccess);
+
+	uint32_t format_count;
+	result = gpu_.getSurfaceFormatsKHR(surface_, &format_count, nullptr);
+	assert(result == vk::Result::eSuccess);
+
+	auto surface_format = std::make_unique<vk::SurfaceFormatKHR[]>(format_count);
+	result = gpu_.getSurfaceFormatsKHR(surface_, &format_count, surface_format.get());
+	assert(result == vk::Result::eSuccess);
+
+	for (unsigned int i = 0; i < format_count; ++i)
+	{
+		gpu_.getSurfaceFormatsKHR(surface_, &i, &surface_format[i]);
+		// color formats 
+	}
+
+	uint32_t present_mode_count;
+	result = gpu_.getSurfacePresentModesKHR(surface_, &present_mode_count, nullptr);
+	assert(result == vk::Result::eSuccess);
+
+	auto present_mode = std::make_unique<vk::PresentModeKHR[]>(present_mode_count);
+	result = gpu_.getSurfacePresentModesKHR(surface_, &present_mode_count, present_mode.get());
+	assert(result == vk::Result::eSuccess);
+
+	uint32_t image_count = 2;
+	if (image_count < caps.minImageCount)
+	{
+		image_count = caps.minImageCount;
+	}
+	if ((caps.maxImageCount > 0) && image_count > caps.maxImageCount)
+	{
+		image_count = caps.maxImageCount;
+	}
+
+	vk::Extent2D extent;
+	if (caps.currentExtent.width == static_cast<uint32_t>(-1))
+	{
+		extent.width = Settings::window_width<uint32_t>;
+		extent.height = Settings::window_height<uint32_t>;
+	}
+	else
+	{
+		extent = caps.currentExtent;
+	}
+
+	vk::CompositeAlphaFlagBitsKHR composite_alpha = vk::CompositeAlphaFlagBitsKHR::eOpaque;
+	vk::CompositeAlphaFlagBitsKHR composite_alpha_flags[] = {
+		vk::CompositeAlphaFlagBitsKHR::eOpaque,
+		vk::CompositeAlphaFlagBitsKHR::ePreMultiplied,
+		vk::CompositeAlphaFlagBitsKHR::ePostMultiplied,
+		vk::CompositeAlphaFlagBitsKHR::eInherit,
+	};
+	for (uint32_t i = 0; i < sizeof(composite_alpha_flags) / sizeof(vk::CompositeAlphaFlagBitsKHR); ++i)
+	{
+		if (caps.supportedCompositeAlpha & composite_alpha_flags[i])
+		{
+			composite_alpha = composite_alpha_flags[i];
+			break;
+		}
+	}
+
+	vk::SurfaceTransformFlagBitsKHR pre_transform;
+	if (caps.currentTransform == vk::SurfaceTransformFlagBitsKHR::eIdentity)
+	{
+		pre_transform = vk::SurfaceTransformFlagBitsKHR::eIdentity;
+	}
+	else
+	{
+		pre_transform = caps.currentTransform;
+	}
+
+	auto swap_chain_info = vk::SwapchainCreateInfoKHR()
+		.setSurface(surface_)
+		.setMinImageCount(image_count)
+		.setImageFormat(swap_target_format_)
+		.setImageColorSpace(vk::ColorSpaceKHR::eSrgbNonlinear)
+		.setImageExtent(extent)
+		.setImageArrayLayers(1)
+		.setImageUsage(vk::ImageUsageFlagBits::eColorAttachment)
+		.setImageSharingMode(vk::SharingMode::eExclusive)
+		.setCompositeAlpha(composite_alpha)
+		.setPreTransform(pre_transform)
+		.setPresentMode(vk::PresentModeKHR::eFifo)
+		.setClipped(true)
+		.setQueueFamilyIndexCount(0)
+		.setPQueueFamilyIndices(nullptr)
+		.setOldSwapchain(old_sc);
+
+	result = device_.createSwapchainKHR(&swap_chain_info, nullptr, &swap_chain_);
+	assert(result == vk::Result::eSuccess);
+
+	if (old_sc)
+	{
+		device_.destroySwapchainKHR(old_sc, nullptr);
+	}
+
+	Log::Info("Swapchain created.");
+
 	return true;
 }
 
-bool Graphics::Impl::CreateImageView(void)
+bool Graphics::Impl::InitSemaphoreSettings(void)
 {
+	vk::SemaphoreCreateInfo semaphore_info;
+
+	// present command completed comfirm
+	device_.createSemaphore(&semaphore_info, nullptr, &present_complete_semaphore_);
+
+	// draw command completed comfirm
+	device_.createSemaphore(&semaphore_info, nullptr, &draw_complete_semaphore_);
+
+	if (!present_complete_semaphore_ || !draw_complete_semaphore_)
+	{
+		return false;
+	}
+
+	return true;
+}
+
+bool Graphics::Impl::CreateCommandBufffer(void)
+{
+	vk::CommandBufferAllocateInfo alloc_info;
+	alloc_info.commandPool = command_pool_;
+	alloc_info.commandBufferCount = sc_image_count_;
+	auto result = device_.allocateCommandBuffers(alloc_info);
+
+	if (result.result != vk::Result::eSuccess)
+	{
+		return false;
+	}
+
+	command_buffers_ = result.value;
+
+	return true;
+}
+
+bool Graphics::Impl::CreateRenderImage(void)
+{
+	auto result = device_.getSwapchainImagesKHR(swap_chain_, &sc_image_count_, nullptr);
+	assert(result == vk::Result::eSuccess);
+
+	std::unique_ptr<vk::Image[]> images(new vk::Image[sc_image_count_]);
+	result = device_.getSwapchainImagesKHR(swap_chain_, &sc_image_count_, images.get());
+	assert(result == vk::Result::eSuccess);
+
+	sc_resources_.reset(new SwapchainImageResources[sc_image_count_]);
+	
+	for (unsigned int i = 0; i < sc_image_count_; ++i)
+	{
+		auto image_view_info = vk::ImageViewCreateInfo()
+			.setViewType(vk::ImageViewType::e2D)
+			.setFormat(swap_target_format_)
+			.setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1));
+
+		sc_resources_[i].image = images[i];
+		image_view_info.image = sc_resources_[i].image;
+
+		result = device_.createImageView(&image_view_info, nullptr, &sc_resources_[i].view);
+		assert(result == vk::Result::eSuccess);
+	}
+
+	Log::Info("Render image created.");
+
+	return true;
+}
+
+bool Graphics::Impl::CreateDepthImage(void)
+{
+	depth_target_.format = vk::Format::eD16Unorm;
+
+	vk::Extent3D extent = vk::Extent3D()
+		.setWidth(Settings::window_width<uint32_t>)
+		.setHeight(Settings::window_height<uint32_t>)
+		.setDepth(1);
+
+
+	auto const image = vk::ImageCreateInfo()
+		.setImageType(vk::ImageType::e2D)
+		.setFormat(depth_target_.format)
+		.setExtent(extent)
+		.setMipLevels(1)
+		.setArrayLayers(1)
+		.setSamples(vk::SampleCountFlagBits::e1)
+		.setTiling(vk::ImageTiling::eOptimal)
+		.setUsage(vk::ImageUsageFlagBits::eDepthStencilAttachment)
+		.setSharingMode(vk::SharingMode::eExclusive)
+		.setQueueFamilyIndexCount(0)
+		.setPQueueFamilyIndices(nullptr)
+		.setInitialLayout(vk::ImageLayout::eUndefined);
+
+	auto result = device_.createImage(&image, nullptr, &depth_target_.image);
+	assert(result == vk::Result::eSuccess);
+
+	vk::MemoryRequirements mem_reqs;
+	device_.getImageMemoryRequirements(depth_target_.image, &mem_reqs);
+
+	depth_target_.mem_alloc.setAllocationSize(mem_reqs.size)
+		.setMemoryTypeIndex(0);
+
+	auto const pass = memory_type_from_properties(mem_reqs.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal,
+		&depth_target_.mem_alloc.memoryTypeIndex);
+	assert(pass);
+
+	result = device_.allocateMemory(&depth_target_.mem_alloc, nullptr, &depth_target_.mem);
+	assert(result == vk::Result::eSuccess);
+
+	result = device_.bindImageMemory(depth_target_.image, depth_target_.mem, 0);
+	assert(result == vk::Result::eSuccess);
+
+	auto const view = vk::ImageViewCreateInfo()
+		.setImage(depth_target_.image)
+		.setViewType(vk::ImageViewType::e2D)
+		.setFormat(depth_target_.format)
+		.setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eDepth, 0, 1, 0, 1));
+
+	result = device_.createImageView(&view, nullptr, &depth_target_.view);
+	assert(result == vk::Result::eSuccess);
+
+	Log::Info("Depth image created.");
+
 	return true;
 }
 
 bool Graphics::Impl::CreateRenderPass(void)
 {
+	const vk::AttachmentDescription attachments[] = 
+	{
+		vk::AttachmentDescription()
+			.setFormat(swap_target_format_)
+			.setSamples(vk::SampleCountFlagBits::e1)
+			.setLoadOp(vk::AttachmentLoadOp::eClear)
+			.setStoreOp(vk::AttachmentStoreOp::eStore)
+			.setStencilLoadOp(vk::AttachmentLoadOp::eDontCare)
+			.setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
+			.setInitialLayout(vk::ImageLayout::eUndefined)
+			.setFinalLayout(vk::ImageLayout::ePresentSrcKHR),
+		vk::AttachmentDescription()
+			.setFormat(depth_target_.format)
+			.setSamples(vk::SampleCountFlagBits::e1)
+			.setLoadOp(vk::AttachmentLoadOp::eClear)
+			.setStoreOp(vk::AttachmentStoreOp::eDontCare)
+			.setStencilLoadOp(vk::AttachmentLoadOp::eDontCare)
+			.setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
+			.setInitialLayout(vk::ImageLayout::eUndefined)
+			.setFinalLayout(vk::ImageLayout::eDepthStencilAttachmentOptimal)
+	};
+
+	auto const color_reference = vk::AttachmentReference().setAttachment(0).setLayout(vk::ImageLayout::eColorAttachmentOptimal);
+
+	auto const depth_reference = vk::AttachmentReference().setAttachment(1).setLayout(vk::ImageLayout::eDepthStencilAttachmentOptimal);
+
+	auto const subpass = vk::SubpassDescription()
+		.setPipelineBindPoint(vk::PipelineBindPoint::eGraphics)
+		.setInputAttachmentCount(0)
+		.setPInputAttachments(nullptr)
+		.setColorAttachmentCount(1)
+		.setPColorAttachments(&color_reference)
+		.setPResolveAttachments(nullptr)
+		.setPDepthStencilAttachment(&depth_reference)
+		.setPreserveAttachmentCount(0)
+		.setPPreserveAttachments(nullptr);
+
+	auto const rp_info = vk::RenderPassCreateInfo()
+		.setAttachmentCount(2)
+		.setPAttachments(attachments)
+		.setSubpassCount(1)
+		.setPSubpasses(&subpass)
+		.setDependencyCount(0)
+		.setPDependencies(nullptr);
+
+	auto result = device_.createRenderPass(&rp_info, nullptr, &render_pass_);
+	assert(result == vk::Result::eSuccess);
+
+	Log::Info("Render pass created.");
+
 	return true;
 }
 
 bool Graphics::Impl::CreateFrameBuffer(void)
 {
+	vk::ImageView attachments[2];
+	attachments[1] = depth_target_.view;
+
+	auto const fb_info = vk::FramebufferCreateInfo()
+		.setRenderPass(render_pass_)
+		.setAttachmentCount(2)
+		.setPAttachments(attachments)
+		.setWidth(Settings::window_width<uint32_t>)
+		.setHeight(Settings::window_height<uint32_t>)
+		.setLayers(1);
+
+	for (uint32_t i = 0; i < sc_image_count_; ++i)
+	{
+		attachments[0] = sc_resources_[i].view;
+
+		auto const result = device_.createFramebuffer(&fb_info, nullptr, &sc_resources_[i].frame_buffer);
+		assert(result == vk::Result::eSuccess);
+	}
+
+	Log::Info("Frame buffer created.");
+
 	return true;
 }
 
-bool Graphics::Impl::CreatePipeline(void)
+bool Graphics::Impl::CreatePipelineCache(void)
 {
+	auto result = device_.createPipelineCache(vk::PipelineCacheCreateInfo());
+
+	if (result.result != vk::Result::eSuccess)
+	{
+		return false;
+	}
+
+	pipeline_cache_ = result.value;
+
+	Log::Info("Pipeline created.");
+
+	return true;
+}
+
+bool Graphics::Impl::CreateQueue(void)
+{
+	device_.getQueue(graphics_queue_family_index_, 0, &queue_);
+
+	Log::Info("Queue created.");
+
 	return true;
 }
