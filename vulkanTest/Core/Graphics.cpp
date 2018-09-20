@@ -16,6 +16,17 @@
 
 #pragma comment(lib, "vulkan-1.lib")
 
+// this call back is global
+VKAPI_ATTR vk::Bool32 VKAPI_CALL DebugMessageCallback(
+	vk::DebugReportFlagsEXT flags,
+	vk::DebugReportObjectTypeEXT objType,
+	uint64_t srcObject,
+	size_t location,
+	int32_t msgCode,
+	const char* pLayerPrefix,
+	const char* pMsg,
+	void* pUserData);
+
 class Graphics::Impl
 {
 public:
@@ -23,10 +34,16 @@ public:
 	{
 		vk::Format				format;
 		vk::Image				image;
+		vk::ImageView			view;
 		vk::MemoryAllocateInfo	mem_alloc;
 		vk::DeviceMemory		mem;
-		vk::ImageView			view;
-	} depth_target_;
+	};
+
+	struct BufferResource
+	{
+		vk::Buffer			buffer;
+		vk::DeviceMemory	mem;
+	};
 
 	const std::unique_ptr<Window>&					window_;
 
@@ -40,17 +57,19 @@ public:
 	std::vector<vk::CommandBuffer>					command_buffers_;
 	vk::Semaphore									present_complete_semaphore_;
 	vk::Semaphore									draw_complete_semaphore_;
+	Depth											depth_target_;
+	BufferResource									vertex_buffer_, index_buffer_;
 
 	std::unique_ptr<vk::QueueFamilyProperties[]>	queue_props_;
 	uint32_t										queue_family_count_;
 
 #if defined(_DEBUG)
-	PFN_vkCreateDebugReportCallbackEXT				create_debug_report_callback;
-	PFN_vkDestroyDebugReportCallbackEXT				destroy_debug_report_callback;
-	PFN_vkDebugReportMessageEXT						debug_break_callback;
-	VkDebugReportCallbackEXT						msg_callback;
+	PFN_vkCreateDebugReportCallbackEXT				create_debug_report_callback_;
+	PFN_vkDestroyDebugReportCallbackEXT				destroy_debug_report_callback_;
+	PFN_vkDebugReportMessageEXT						debug_break_callback_;
+	VkDebugReportCallbackEXT						msg_callback_;
 #endif
-	
+
 	// swap chain
 	struct SwapchainImageResources
 	{
@@ -79,15 +98,14 @@ public:
 		, sc_image_count_(0)
 		, sc_current_image_(0)
 #if defined(_DEBUG)
-		, create_debug_report_callback(VK_NULL_HANDLE)
-		, destroy_debug_report_callback(VK_NULL_HANDLE)
-		, debug_break_callback(VK_NULL_HANDLE)
+		, create_debug_report_callback_(VK_NULL_HANDLE)
+		, destroy_debug_report_callback_(VK_NULL_HANDLE)
+		, debug_break_callback_(VK_NULL_HANDLE)
 #endif
 	{
 		present_info_.setSwapchainCount(1)
 			.setPSwapchains(&swap_chain_)
 			.setPImageIndices(&sc_current_image_);
-
 	}
 
 	bool CreateInstance(void);
@@ -99,51 +117,13 @@ public:
 	bool CreatePipelineCache(void);
 	bool CreateCommandPool(void);		// similar command allocater
 	bool CreateSwapChain(void);
+	bool CreateRenderPass(void);
 	bool InitSemaphoreSettings(void);
 	bool CreateCommandBufffer(void);
-
-	bool CreateRenderImage(void);
+	bool CreateSwapChainResources(void);
 	bool CreateDepthImage(void);
-	bool CreateRenderPass(void);
+
 	bool CreateFrameBuffer(void);
-
-	vk::Bool32 DebugMessageCallback(
-		VkDebugReportFlagsEXT flags,
-		VkDebugReportObjectTypeEXT objType,
-		uint64_t srcObject,
-		size_t location,
-		int32_t msgCode,
-		const char* pLayerPrefix,
-		const char* pMsg,
-		void* pUserData)
-	{
-		std::string message;
-		{
-			std::stringstream buf;
-			if (flags & VK_DEBUG_REPORT_ERROR_BIT_EXT) {
-				buf << "ERROR: ";
-			}
-			else if (flags & VK_DEBUG_REPORT_WARNING_BIT_EXT) {
-				buf << "WARNING: ";
-			}
-			else if (flags & VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT) {
-				buf << "PERF: ";
-			}
-			else {
-				return false;
-			}
-			buf << "[" << pLayerPrefix << "] Code " << msgCode << " : " << pMsg;
-			message = buf.str();
-		}
-
-		std::cout << message << std::endl;
-
-		// デバッグウィンドウにも出力
-		OutputDebugStringA(message.c_str());
-		OutputDebugStringA("\n");
-
-		return false;
-	}
 
 	uint32_t FindQueue(vk::QueueFlags flag)
 	{
@@ -210,7 +190,7 @@ public:
 			.setNewLayout(new_layout)
 			.setSubresourceRange(sub_range);
 
-		/*old layout*/{
+		/*old layout*/ {
 			if (old_layout == vk::ImageLayout::ePreinitialized)
 				image_memory_barrier.srcAccessMask = vk::AccessFlagBits::eHostWrite;
 			// transfer destination
@@ -230,14 +210,14 @@ public:
 				image_memory_barrier.srcAccessMask = vk::AccessFlagBits::eShaderRead;
 		}
 
-		/*next layout*/{
+		/*next layout*/ {
 			// transfer destination
 			if (new_layout == vk::ImageLayout::eTransferDstOptimal)
 				image_memory_barrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
 			// transfer source
 			else if (new_layout == vk::ImageLayout::eTransferSrcOptimal)
 				image_memory_barrier.dstAccessMask = vk::AccessFlagBits::eTransferRead;// | image_memory_barrier.srcAccessMask;
-			// color																																	 // カラー
+																					   // color																																	 // カラー
 			else if (new_layout == vk::ImageLayout::eColorAttachmentOptimal)
 				image_memory_barrier.dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
 			// depth stencil
@@ -297,7 +277,7 @@ bool Graphics::Initialize(void)
 	if (!impl_->EnumeratePhysicalDevice()) return false;
 
 	if (!impl_->CreateSurface()) return false;
-	
+
 	if (!impl_->CreateDevice()) return false;
 
 	if (!impl_->CreateDebugLayer()) return false;
@@ -310,15 +290,15 @@ bool Graphics::Initialize(void)
 
 	if (!impl_->CreateSwapChain()) return false;
 
-	if (!impl_->CreateRenderImage()) return false;
-	
-	if (!impl_->CreateDepthImage()) return false;
+	if (!impl_->CreateRenderPass()) return false;
 
 	if (!impl_->InitSemaphoreSettings()) return false;
-	
+
 	if (!impl_->CreateCommandBufffer()) return false;
 
-	//if (!impl_->CreateRenderPass()) return false;
+	if (!impl_->CreateSwapChainResources()) return false;
+
+	if (!impl_->CreateDepthImage()) return false;
 
 	//if (!impl_->CreateFrameBuffer()) return false;
 
@@ -346,6 +326,13 @@ bool Graphics::Run(void)
 
 		auto& color_image = impl_->sc_resources_[impl_->sc_current_image_].image;
 
+		impl_->SetPipelineBarrier(
+			cmd_buffer,
+			color_image,
+			vk::ImageLayout::eUndefined,
+			vk::ImageLayout::eTransferDstOptimal,
+			image_sub_range);
+
 		cmd_buffer.clearColorImage(color_image, vk::ImageLayout::eTransferDstOptimal, clear_color, image_sub_range);
 
 		impl_->SetPipelineBarrier(
@@ -358,7 +345,7 @@ bool Graphics::Run(void)
 		cmd_buffer.end();
 	}
 
-	/*command buffer submit*/{
+	/*command buffer submit*/ {
 		vk::PipelineStageFlags pipeline_stages = vk::PipelineStageFlagBits::eBottomOfPipe;
 		vk::SubmitInfo submitInfo;
 		submitInfo.pWaitDstStageMask = &pipeline_stages;
@@ -439,33 +426,6 @@ bool Graphics::Impl::CreateInstance(void)
 	return true;
 }
 
-bool Graphics::Impl::CreateDebugLayer(void)
-{
-#if defined(_DEBUG)
-	{
-		/*create_debug_report_callback = (PFN_vkCreateDebugReportCallbackEXT)instance_.getProcAddr("vkCreateDebugReportCallbackEXT");
-		destroy_debug_report_callback = (PFN_vkDestroyDebugReportCallbackEXT)instance_.getProcAddr("vkDestroyDebugReportCallbackEXT");
-		debug_break_callback = (PFN_vkDebugReportMessageEXT)instance_.getProcAddr("vkDebugReportMessageEXT");
-
-		VkDebugReportCallbackCreateInfoEXT dbgCreateInfo = {};
-		vk::DebugReportFlagsEXT flags = vk::DebugReportFlagBitsEXT::eError | vk::DebugReportFlagBitsEXT::eWarning;
-		dbgCreateInfo.sType = VK_STRUCTURE_TYPE_DEBUG_REPORT_CREATE_INFO_EXT;
-		dbgCreateInfo.pfnCallback = (PFN_vkDebugReportCallbackEXT)DebugMessageCallback;
-		dbgCreateInfo.flags = flags.operator VkSubpassDescriptionFlags();
-
-		create_debug_report_callback(static_cast<VkInstance>(instance_), &dbgCreateInfo, nullptr, &msg_callback);
-		
-		if (!msg_callback)
-		{
-			Log::Error("Cannot create debug layer.");
-			return false;
-		}*/
-	}
-#endif
-
-	return true;
-}
-
 bool Graphics::Impl::EnumeratePhysicalDevice(void)
 {
 	uint32_t gpu_count;
@@ -516,8 +476,8 @@ bool Graphics::Impl::EnumeratePhysicalDevice(void)
 			auto result = gpu_.enumerateDeviceExtensionProperties(nullptr, &device_extension_count, nullptr);
 			assert(result == vk::Result::eSuccess);
 			Log::Info("Extension Count = %d", device_extension_count);
-			
-			/*device features*/{
+
+			/*device features*/ {
 				vk::PhysicalDeviceFeatures dev_features;
 				gpu_.getFeatures(&dev_features);
 
@@ -579,7 +539,7 @@ bool Graphics::Impl::EnumeratePhysicalDevice(void)
 				Log::Info("inheritedQueries = %d\n", dev_features.inheritedQueries);
 			}
 
-			/*memory propaties*/{
+			/*memory propaties*/ {
 				vk::PhysicalDeviceMemoryProperties memory_props;
 				gpu_.getMemoryProperties(&memory_props);
 			}
@@ -691,6 +651,58 @@ bool Graphics::Impl::CreateDevice(void)
 	return true;
 }
 
+bool Graphics::Impl::CreateDebugLayer(void)
+{
+#if defined(_DEBUG)
+	{
+		create_debug_report_callback_ = reinterpret_cast<PFN_vkCreateDebugReportCallbackEXT>(instance_.getProcAddr("vkCreateDebugReportCallbackEXT"));
+		destroy_debug_report_callback_ = reinterpret_cast<PFN_vkDestroyDebugReportCallbackEXT>(instance_.getProcAddr("vkDestroyDebugReportCallbackEXT"));
+		debug_break_callback_ = reinterpret_cast<PFN_vkDebugReportMessageEXT>(instance_.getProcAddr("vkDebugReportMessageEXT"));
+
+		vk::DebugReportFlagsEXT flags = vk::DebugReportFlagBitsEXT::eError | vk::DebugReportFlagBitsEXT::eWarning;
+
+		vk::DebugReportCallbackCreateInfoEXT dbg_create_info = vk::DebugReportCallbackCreateInfoEXT()
+			.setPfnCallback(reinterpret_cast<PFN_vkDebugReportCallbackEXT>(DebugMessageCallback))
+			.setFlags(static_cast<vk::DebugReportFlagsEXT>(flags.operator VkSubpassDescriptionFlags()));
+
+		auto result = create_debug_report_callback_(static_cast<VkInstance>(instance_), reinterpret_cast<VkDebugReportCallbackCreateInfoEXT*>(&dbg_create_info), nullptr, &msg_callback_);
+
+		if (static_cast<vk::Result>(result) != vk::Result::eSuccess)
+		{
+			Log::Error("Debug layer cannot created.");
+			return false;
+		}
+	}
+#endif
+
+	return true;
+}
+
+bool Graphics::Impl::CreatePipelineCache(void)
+{
+	auto result = device_.createPipelineCache(vk::PipelineCacheCreateInfo());
+	if (result.result != vk::Result::eSuccess)
+	{
+		Log::Error("Pipeline cache cannot created.");
+		return false;
+	}
+
+	pipeline_cache_ = result.value;
+
+	Log::Info("Pipeline cache create done.");
+
+	return true;
+}
+
+bool Graphics::Impl::CreateQueue(void)
+{
+	device_.getQueue(graphics_queue_family_index_, 0, &queue_);
+
+	Log::Info("Graphics queue create done.");
+
+	return true;
+}
+
 bool Graphics::Impl::CreateCommandPool(void)
 {
 	auto command_info = vk::CommandPoolCreateInfo()
@@ -698,7 +710,7 @@ bool Graphics::Impl::CreateCommandPool(void)
 		.setFlags(vk::CommandPoolCreateFlagBits::eResetCommandBuffer);
 
 	device_.createCommandPool(&command_info, nullptr, &command_pool_);
-	
+
 	if (!command_pool_)
 	{
 		Log::Info("Commandpool cannot created.");
@@ -712,31 +724,29 @@ bool Graphics::Impl::CreateCommandPool(void)
 
 bool Graphics::Impl::CreateSwapChain(void)
 {
-	vk::SwapchainKHR old_sc = swap_chain_;
+	auto old_sc = swap_chain_;
 
 	swap_target_format_ = vk::Format::eR8G8B8A8Unorm;
 
-	uint32_t supported;
-	auto result = gpu_.getSurfaceSupportKHR(graphics_queue_family_index_, surface_, &supported);
-	assert(result == vk::Result::eSuccess);
-
 	vk::SurfaceCapabilitiesKHR caps;
-	result = gpu_.getSurfaceCapabilitiesKHR(surface_, &caps);
+	auto result = gpu_.getSurfaceCapabilitiesKHR(surface_, &caps);
 	assert(result == vk::Result::eSuccess);
 
 	uint32_t format_count;
 	result = gpu_.getSurfaceFormatsKHR(surface_, &format_count, nullptr);
 	assert(result == vk::Result::eSuccess);
-
+	
 	auto surface_format = std::make_unique<vk::SurfaceFormatKHR[]>(format_count);
-	result = gpu_.getSurfaceFormatsKHR(surface_, &format_count, surface_format.get());
-	assert(result == vk::Result::eSuccess);
-
+	
 	for (unsigned int i = 0; i < format_count; ++i)
 	{
 		gpu_.getSurfaceFormatsKHR(surface_, &i, &surface_format[i]);
-		// color formats 
+		// color formats
+		Log::Info("[%d]colorSpace : %d", i, surface_format[i].colorSpace);
 	}
+
+	result = gpu_.getSurfaceFormatsKHR(surface_, &format_count, surface_format.get());
+	assert(result == vk::Result::eSuccess);
 
 	uint32_t present_mode_count;
 	result = gpu_.getSurfacePresentModesKHR(surface_, &present_mode_count, nullptr);
@@ -822,7 +832,77 @@ bool Graphics::Impl::CreateSwapChain(void)
 		device_.destroySwapchainKHR(old_sc, nullptr);
 	}
 
+	auto sc_image_count = device_.getSwapchainImagesKHR(swap_chain_).value;
+	sc_image_count_ = static_cast<uint32_t>(sc_image_count.size());
+
 	Log::Info("Swapchain create done.");
+
+	return true;
+}
+
+bool Graphics::Impl::CreateRenderPass(void)
+{
+	const vk::AttachmentDescription attachments[] =
+	{
+		vk::AttachmentDescription()
+		.setFormat(swap_target_format_)
+		.setSamples(vk::SampleCountFlagBits::e1)
+		.setLoadOp(vk::AttachmentLoadOp::eClear)
+		.setStoreOp(vk::AttachmentStoreOp::eStore)
+		.setStencilLoadOp(vk::AttachmentLoadOp::eDontCare)
+		.setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
+		.setInitialLayout(vk::ImageLayout::eUndefined)
+		.setFinalLayout(vk::ImageLayout::ePresentSrcKHR),
+		vk::AttachmentDescription()
+		.setFormat(depth_target_.format)
+		.setSamples(vk::SampleCountFlagBits::e1)
+		.setLoadOp(vk::AttachmentLoadOp::eClear)
+		.setStoreOp(vk::AttachmentStoreOp::eDontCare)
+		.setStencilLoadOp(vk::AttachmentLoadOp::eDontCare)
+		.setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
+		.setInitialLayout(vk::ImageLayout::eDepthStencilAttachmentOptimal)
+		.setFinalLayout(vk::ImageLayout::eDepthStencilAttachmentOptimal)
+	};
+
+	auto const color_reference = vk::AttachmentReference().setAttachment(0).setLayout(vk::ImageLayout::eColorAttachmentOptimal);
+
+	auto const depth_reference = vk::AttachmentReference().setAttachment(1).setLayout(vk::ImageLayout::eDepthStencilAttachmentOptimal);
+
+	auto const subpass = vk::SubpassDescription()
+		.setPipelineBindPoint(vk::PipelineBindPoint::eGraphics)
+		.setInputAttachmentCount(0)
+		.setPInputAttachments(nullptr)
+		.setColorAttachmentCount(1)
+		.setPColorAttachments(&color_reference)
+		.setPResolveAttachments(nullptr)
+		.setPDepthStencilAttachment(&depth_reference)
+		.setPreserveAttachmentCount(0)
+		.setPPreserveAttachments(nullptr);
+
+	auto const dependency = vk::SubpassDependency()
+		.setSrcSubpass(0)
+		.setDstSubpass(VK_SUBPASS_EXTERNAL)
+		.setSrcStageMask(vk::PipelineStageFlagBits::eBottomOfPipe)
+		.setDstStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput)
+		.setSrcAccessMask(vk::AccessFlagBits::eColorAttachmentWrite)
+		.setDstAccessMask(vk::AccessFlagBits::eColorAttachmentRead);
+
+	auto const rp_info = vk::RenderPassCreateInfo()
+		.setAttachmentCount(std::size(attachments))
+		.setPAttachments(attachments)
+		.setSubpassCount(1)
+		.setPSubpasses(&subpass)
+		.setDependencyCount(1)
+		.setPDependencies(&dependency);
+
+	auto result = device_.createRenderPass(&rp_info, nullptr, &render_pass_);
+	if (result != vk::Result::eSuccess)
+	{
+		Log::Error("Render pass cannot created.");
+		return false;
+	}
+
+	Log::Info("Render pass create done.");
 
 	return true;
 }
@@ -868,7 +948,7 @@ bool Graphics::Impl::CreateCommandBufffer(void)
 	return true;
 }
 
-bool Graphics::Impl::CreateRenderImage(void)
+bool Graphics::Impl::CreateSwapChainResources(void)
 {
 	auto result = device_.getSwapchainImagesKHR(swap_chain_, &sc_image_count_, nullptr);
 	if (result != vk::Result::eSuccess)
@@ -886,7 +966,7 @@ bool Graphics::Impl::CreateRenderImage(void)
 	}
 
 	sc_resources_.reset(new SwapchainImageResources[sc_image_count_]);
-	
+
 	for (unsigned int i = 0; i < sc_image_count_; ++i)
 	{
 		auto image_view_info = vk::ImageViewCreateInfo()
@@ -897,15 +977,17 @@ bool Graphics::Impl::CreateRenderImage(void)
 		sc_resources_[i].image = images[i];
 		image_view_info.image = sc_resources_[i].image;
 
+		sc_resources_[i].fence = vk::Fence();
+
 		result = device_.createImageView(&image_view_info, nullptr, &sc_resources_[i].view);
 		if (result != vk::Result::eSuccess)
 		{
-			Log::Error("Render image cannot created.");
+			Log::Error("Swap chain resources cannot created.");
 			return false;
 		}
 	}
 
-	Log::Info("Render image create done.");
+	Log::Info("Swap chain resources create done.");
 
 	return true;
 }
@@ -986,65 +1068,6 @@ bool Graphics::Impl::CreateDepthImage(void)
 	return true;
 }
 
-bool Graphics::Impl::CreateRenderPass(void)
-{
-	const vk::AttachmentDescription attachments[] = 
-	{
-		vk::AttachmentDescription()
-			.setFormat(swap_target_format_)
-			.setSamples(vk::SampleCountFlagBits::e1)
-			.setLoadOp(vk::AttachmentLoadOp::eClear)
-			.setStoreOp(vk::AttachmentStoreOp::eStore)
-			.setStencilLoadOp(vk::AttachmentLoadOp::eDontCare)
-			.setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
-			.setInitialLayout(vk::ImageLayout::eUndefined)
-			.setFinalLayout(vk::ImageLayout::ePresentSrcKHR),
-		vk::AttachmentDescription()
-			.setFormat(depth_target_.format)
-			.setSamples(vk::SampleCountFlagBits::e1)
-			.setLoadOp(vk::AttachmentLoadOp::eClear)
-			.setStoreOp(vk::AttachmentStoreOp::eDontCare)
-			.setStencilLoadOp(vk::AttachmentLoadOp::eDontCare)
-			.setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
-			.setInitialLayout(vk::ImageLayout::eUndefined)
-			.setFinalLayout(vk::ImageLayout::eDepthStencilAttachmentOptimal)
-	};
-
-	auto const color_reference = vk::AttachmentReference().setAttachment(0).setLayout(vk::ImageLayout::eColorAttachmentOptimal);
-
-	auto const depth_reference = vk::AttachmentReference().setAttachment(1).setLayout(vk::ImageLayout::eDepthStencilAttachmentOptimal);
-
-	auto const subpass = vk::SubpassDescription()
-		.setPipelineBindPoint(vk::PipelineBindPoint::eGraphics)
-		.setInputAttachmentCount(0)
-		.setPInputAttachments(nullptr)
-		.setColorAttachmentCount(1)
-		.setPColorAttachments(&color_reference)
-		.setPResolveAttachments(nullptr)
-		.setPDepthStencilAttachment(&depth_reference)
-		.setPreserveAttachmentCount(0)
-		.setPPreserveAttachments(nullptr);
-
-	auto const rp_info = vk::RenderPassCreateInfo()
-		.setAttachmentCount(2)
-		.setPAttachments(attachments)
-		.setSubpassCount(1)
-		.setPSubpasses(&subpass)
-		.setDependencyCount(0)
-		.setPDependencies(nullptr);
-
-	auto result = device_.createRenderPass(&rp_info, nullptr, &render_pass_);
-	if (result != vk::Result::eSuccess)
-	{
-		Log::Error("Render pass cannot created.");
-		return false;
-	}
-
-	Log::Info("Render pass create done.");
-
-	return true;
-}
-
 bool Graphics::Impl::CreateFrameBuffer(void)
 {
 	vk::ImageView attachments[2];
@@ -1052,7 +1075,7 @@ bool Graphics::Impl::CreateFrameBuffer(void)
 
 	auto const fb_info = vk::FramebufferCreateInfo()
 		.setRenderPass(render_pass_)
-		.setAttachmentCount(2)
+		.setAttachmentCount(std::size(attachments))
 		.setPAttachments(attachments)
 		.setWidth(Settings::window_width<uint32_t>)
 		.setHeight(Settings::window_height<uint32_t>)
@@ -1063,7 +1086,10 @@ bool Graphics::Impl::CreateFrameBuffer(void)
 		attachments[0] = sc_resources_[i].view;
 
 		auto const result = device_.createFramebuffer(&fb_info, nullptr, &sc_resources_[i].frame_buffer);
-		assert(result == vk::Result::eSuccess);
+		if (result != vk::Result::eSuccess)
+		{
+			Log::Error("Frame buffer cannot created.");
+		}
 	}
 
 	Log::Info("Frame buffer create done.");
@@ -1071,27 +1097,40 @@ bool Graphics::Impl::CreateFrameBuffer(void)
 	return true;
 }
 
-bool Graphics::Impl::CreatePipelineCache(void)
+VKAPI_ATTR vk::Bool32 VKAPI_CALL DebugMessageCallback(
+	vk::DebugReportFlagsEXT flags,
+	vk::DebugReportObjectTypeEXT objType,
+	uint64_t srcObject,
+	size_t location,
+	int32_t msgCode,
+	const char* pLayerPrefix,
+	const char* pMsg,
+	void* pUserData)
 {
-	auto result = device_.createPipelineCache(vk::PipelineCacheCreateInfo());
-	if (result.result != vk::Result::eSuccess)
+	std::string message;
 	{
-		Log::Error("Pipeline cache cannot created.");
-		return false;
+		std::stringstream buf;
+		if (flags & vk::DebugReportFlagBitsEXT::eError) 
+		{
+			buf << "ERROR: ";
+		}
+		else if (flags & vk::DebugReportFlagBitsEXT::eWarning) 
+		{
+			buf << "WARNING: ";
+		}
+		else if (flags & vk::DebugReportFlagBitsEXT::ePerformanceWarning) 
+		{
+			buf << "PERF: ";
+		}
+		else 
+		{
+			return VK_FALSE;
+		}
+		buf << "[" << pLayerPrefix << "] Code " << msgCode << " : " << pMsg;
+		message = buf.str();
 	}
 
-	pipeline_cache_ = result.value;
+	Log::Warning(message);
 
-	Log::Info("Pipeline cache create done.");
-
-	return true;
-}
-
-bool Graphics::Impl::CreateQueue(void)
-{
-	device_.getQueue(graphics_queue_family_index_, 0, &queue_);
-
-	Log::Info("Graphics queue create done.");
-
-	return true;
+	return VK_FALSE;
 }
